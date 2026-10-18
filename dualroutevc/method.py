@@ -4,6 +4,14 @@ from torch.nn import functional as F
 from .layers import Encoder,warp,image_demo
 
 
+def frozen_features(image):
+    """Fixed RGB and Sobel features; no external backbone or labels required."""
+    horizontal=image.new_tensor([[-1,0,1],[-2,0,2],[-1,0,1]])/8
+    kernels=torch.stack([horizontal,horizontal.T]).repeat(image.shape[1],1,1)[:,None]
+    gradient=F.conv2d(F.pad(image,(1,1,1,1),mode='replicate'),kernels,groups=image.shape[1])
+    return torch.cat([image,gradient],1)
+
+
 class Model(nn.Module):
     def __init__(self,c):
         super().__init__();self.c=c;w=c.get('width',24);self.base=Encoder(6,w);self.base_decoder=nn.Conv2d(w,3,1)
@@ -29,11 +37,13 @@ class Model(nn.Module):
         rate=lambda z:-(torch.sigmoid(z+step/2)-torch.sigmoid(z-step/2)).clamp_min(1e-8).log2().mean((1,2,3))
         return {'prediction':restored,'base_prediction':base,'flow':refined_flow,'dominant_flow':flow,'entropy':entropy,
                 'base_latent':latent,'enhancement_latent':enhancement,'base_rate':rate(latent)[:,None],
-                'enhancement_rate':rate(enhancement)[:,None],'transport':warp(previous,refined_flow)}
+                'enhancement_rate':rate(enhancement)[:,None],'transport':warp(previous,refined_flow),
+                'feature_transport':warp(frozen_features(previous),refined_flow),
+                'target_features':frozen_features(current)}
     def objective(self,b,p):
         target=b['y'].float();loss=F.mse_loss(p['base_prediction'],target)+F.mse_loss(p['prediction'],target)
         loss=loss+self.c.get('rate_weight',.01)*(p['base_rate'].mean()+p['enhancement_rate'].mean())
-        if self.c['variant'] not in {'baseline','base_only'}:loss=loss+.2*F.l1_loss(p['transport'],target)
+        if self.c['variant'] not in {'baseline','base_only'}:loss=loss+.2*F.l1_loss(p['feature_transport'],p['target_features'])
         return loss
 
 
@@ -46,6 +56,7 @@ def measure(p,d,c):
     import numpy as np
     r={'base_bits_per_pixel':float(p['base_rate'].mean()*p['base_latent'].shape[1]),
        'enhancement_bits_per_pixel':float(p['enhancement_rate'].mean()*p['enhancement_latent'].shape[1]),
-       'feature_transport_mae':float(np.mean(abs(p['transport']-d['y'])))}
+       'pixel_transport_mae':float(np.mean(abs(p['transport']-d['y']))),
+       'feature_transport_mae':float(np.mean(abs(p['feature_transport']-p['target_features'])))}
     if 'flow' in d:r['flow_epe']=float(np.linalg.norm(p['flow']-d['flow'],axis=1).mean())
     return r

@@ -73,3 +73,11 @@ python -m dualroutevc.codec decode --model runs/full/model.pt --input runs/video
 ```
 
 The video archive contains `x[T,3,H,W]` unit-range frames. Both encoder and decoder use the previous base reconstruction, so enhancement is optional. Quantized base, motion, and enhancement arrays are independently DEFLATE coded in a versioned stream; the adjacent JSON reports actual total stream bytes including headers. This concrete coder is distinct from the differentiable logistic entropy objective. Decoder output is an NPZ video in the same frame layout.
+
+## Selected reproduction setting
+
+Use fixed RGB plus grouped Sobel features as the frozen machine representation. Both the feature loss and feature_transport_mae now compare actual warped features, while pixel_transport_mae remains separate. The decoder exports transported_features from the decoded reference and decoded motion; base and enhancement streams remain independently usable. A generated moving-texture video is available without external weights. Use actual stream bytes for bpp, not the entropy surrogate.
+
+```bash
+python -m dualroutevc.codec demo --output data/video.npz --frames 16 --seed 13
+```

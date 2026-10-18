@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .method import Model
+from .method import Model, frozen_features
+from .layers import warp
 
 
 def array_bytes(value):
@@ -29,12 +30,20 @@ def quantize(value,step):
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('command',choices=['encode','decode'])
-    parser.add_argument('--model',required=True)
-    parser.add_argument('--input',required=True)
+    parser.add_argument('command',choices=['demo','encode','decode'])
+    parser.add_argument('--model')
+    parser.add_argument('--input')
     parser.add_argument('--output',required=True)
     parser.add_argument('--base-only',action='store_true')
+    parser.add_argument('--frames',type=int,default=16)
+    parser.add_argument('--seed',type=int,default=13)
     args=parser.parse_args()
+    if args.command=='demo':
+        if args.frames<2:parser.error('frames must be at least two')
+        rng=np.random.default_rng(args.seed);initial=rng.uniform(.05,.15,(3,32,32)).astype(np.float32);initial[:,10:20,8:18]=.8
+        frames=np.stack([np.roll(initial,index,axis=-1) for index in range(args.frames)]);flow=np.zeros((args.frames,2,32,32),np.float32);flow[1:,0]=-1
+        Path(args.output).parent.mkdir(parents=True,exist_ok=True);np.savez_compressed(args.output,x=frames,flow=flow);return
+    if not args.model or not args.input:parser.error('encode/decode require --model and --input')
     state=torch.load(args.model,map_location='cpu',weights_only=True)
     model=Model(state['config'])
     model.load_state_dict(state['state'])
@@ -67,6 +76,7 @@ def main():
     else:
         decoded=[]
         flows=[]
+        features=[]
         with zipfile.ZipFile(args.input) as archive:
             header=json.loads(archive.read('header.json'))
             if header['format']!=1:
@@ -74,8 +84,10 @@ def main():
             step=header['step']
             reference=torch.from_numpy(read_array(archive,'initial.npy').astype(np.float32)/255)[None]
             decoded.append(reference[0].numpy())
+            features.append(frozen_features(reference)[0].detach().numpy())
             flows.append(np.zeros((2,*reference.shape[-2:]),np.float32))
             for index in range(1,header['frames']):
+                previous=reference
                 base=torch.from_numpy(read_array(archive,f'base_{index}.npy').astype(np.float32)*step)
                 with torch.no_grad():
                     reference=(reference+model.base_decoder(base)).clamp(0,1)
@@ -89,7 +101,8 @@ def main():
                         flow=motion+refinement[:,3:]
                 decoded.append(output[0].numpy())
                 flows.append(flow[0].numpy())
-        np.savez_compressed(args.output,x=np.stack(decoded),flow=np.stack(flows))
+                features.append(warp(frozen_features(previous),flow)[0].detach().numpy())
+        np.savez_compressed(args.output,x=np.stack(decoded),flow=np.stack(flows),transported_features=np.stack(features))
 
 
 if __name__=='__main__':main()
